@@ -12,10 +12,25 @@
   "activationEvents": [],
   "main": "./extension.js",
   "contributes": {
-    "commands": [{
-      "command": "vibejournal.helloWorld",
-      "title": "Hello World"
-    }]
+    "commands": [
+      {
+        "command": "code-tutor.show",
+        "title": "Show website"
+      },
+      {
+        "command": "show.journal",
+        "title": "Show journal"
+      }
+    ],
+    "chatParticipants": [
+      {
+        "id": "17sf.code-expert",
+        "fullName": "17 Steps Forward",
+        "name": "17",
+        "description": "What to explore today?",
+        "isSticky": true
+      }
+    ]
   },
   "scripts": {
     "lint": "eslint .",
@@ -23,12 +38,13 @@
     "test": "vscode-test"
   },
   "devDependencies": {
-    "@types/vscode": "^1.134.0",
     "@types/mocha": "^10.0.10",
     "@types/node": "24.x",
-    "eslint": "^10.5.0",
+    "@types/vscode": "^1.134.0",
     "@vscode/test-cli": "^0.0.15",
-    "@vscode/test-electron": "^3.0.0"
+    "@vscode/test-electron": "^3.0.0",
+    "eslint": "^10.5.0",
+    "globals": "^17.11.0"
   },
   "overrides": {
     "diff": "^8.0.4",

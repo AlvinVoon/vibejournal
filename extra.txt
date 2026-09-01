@@ -1,0 +1,12 @@
+ const journalEntries = ${JSON.stringify(journalEntries)};
+  let state = {
+    coach: journalEntries,
+    feedback: {},
+    selectedConceptId: null,
+    activeLang: 'all',
+    journalByLang: {}
+  };
+  journalEntries.forEach(c => {
+    if (!state.journalByLang[c.lang]) state.journalByLang[c.lang] = [];
+    state.journalByLang[c.lang].push(c);
+  });

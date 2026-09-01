@@ -19,229 +19,472 @@ Example:
  */
 async function activate(context) {
 
-    /**
-     * @param {import('vscode').LanguageModelChatResponse} chatResponse
-     * @param {import('vscode').ChatResponseStream} stream
-     */
-    async function parseAndStreamResponse(chatResponse, stream) {
-        const OPEN_TAG = '<json>';
-        const CLOSE_TAG = '</json>';
+  /**
+   * @param {import('vscode').LanguageModelChatResponse} chatResponse
+   * @param {import('vscode').ChatResponseStream} stream
+   */
+  async function parseAndStreamResponse(chatResponse, stream) {
+    const OPEN_TAG = '<json>';
+    const CLOSE_TAG = '</json>';
 
-        let textBuffer = '';      // accumulates raw fragments to scan for tags
-        let inJson = false;
-        let jsonBuffer = '';
-        const jsonChunks = [];
+    let textBuffer = '';      // accumulates raw fragments to scan for tags
+    let inJson = false;
+    let jsonBuffer = '';
+    const jsonChunks = [];
 
-        for await (const fragment of chatResponse.text) {
-            textBuffer += fragment;
+    for await (const fragment of chatResponse.text) {
+      textBuffer += fragment;
 
-            // Keep processing as long as we can find a complete tag boundary
-            let progress = true;
-            while (progress) {
-                progress = false;
+      // Keep processing as long as we can find a complete tag boundary
+      let progress = true;
+      while (progress) {
+        progress = false;
 
-                if (!inJson) {
-                    const openIdx = textBuffer.indexOf(OPEN_TAG);
-                    if (openIdx !== -1) {
-                        // Stream everything before the tag as plain text
-                        const plainText = textBuffer.slice(0, openIdx);
-                        if (plainText) {
-                            stream.markdown(plainText);
-                        }
-                        textBuffer = textBuffer.slice(openIdx + OPEN_TAG.length);
-                        inJson = true;
-                        jsonBuffer = '';
-                        progress = true;
-                    } else {
-                        // No open tag yet — but don't flush the whole buffer,
-                        // in case it ends mid-tag (e.g. "...text<js"). Hold back
-                        // a small tail equal to the tag length just in case.
-                        const safeFlushLen = Math.max(0, textBuffer.length - OPEN_TAG.length);
-                        if (safeFlushLen > 0) {
-                            stream.markdown(textBuffer.slice(0, safeFlushLen));
-                            textBuffer = textBuffer.slice(safeFlushLen);
-                        }
-                    }
-                } else {
-                    const closeIdx = textBuffer.indexOf(CLOSE_TAG);
-                    if (closeIdx !== -1) {
-                        jsonBuffer += textBuffer.slice(0, closeIdx);
-                        jsonChunks.push(jsonBuffer);
-                        textBuffer = textBuffer.slice(closeIdx + CLOSE_TAG.length);
-                        inJson = false;
-                        jsonBuffer = '';
-                        progress = true;
-                    } else {
-                        // Still inside JSON, no close tag yet — but the same
-                        // "</json>" tag could be split across this fragment and
-                        // the next one, so hold back a tail equal to the tag
-                        // length instead of consuming everything blindly.
-                        const safeFlushLen = Math.max(0, textBuffer.length - CLOSE_TAG.length);
-                        if (safeFlushLen > 0) {
-                            jsonBuffer += textBuffer.slice(0, safeFlushLen);
-                            textBuffer = textBuffer.slice(safeFlushLen);
-                        }
-                    }
-                }
+        if (!inJson) {
+          const openIdx = textBuffer.indexOf(OPEN_TAG);
+          if (openIdx !== -1) {
+            // Stream everything before the tag as plain text
+            const plainText = textBuffer.slice(0, openIdx);
+            if (plainText) {
+              stream.markdown(plainText);
             }
-        }
-
-        // Stream ended — handle whatever's left in the buffers.
-        if (inJson) {
-            // The model never emitted a closing </json>. Don't silently drop
-            // the content: fold the leftover tail back in and keep what we have.
-            jsonBuffer += textBuffer;
-            textBuffer = '';
-            if (jsonBuffer.trim()) {
-                console.warn('parseAndStreamResponse: stream ended with an unterminated <json> block; attempting to parse partial content.');
-                jsonChunks.push(jsonBuffer);
+            textBuffer = textBuffer.slice(openIdx + OPEN_TAG.length);
+            inJson = true;
+            jsonBuffer = '';
+            progress = true;
+          } else {
+            // No open tag yet — but don't flush the whole buffer,
+            // in case it ends mid-tag (e.g. "...text<js"). Hold back
+            // a small tail equal to the tag length just in case.
+            const safeFlushLen = Math.max(0, textBuffer.length - OPEN_TAG.length);
+            if (safeFlushLen > 0) {
+              stream.markdown(textBuffer.slice(0, safeFlushLen));
+              textBuffer = textBuffer.slice(safeFlushLen);
             }
-        } else if (textBuffer) {
-            stream.markdown(textBuffer);
-        }
-
-        // Parse all collected JSON chunks
-        const concepts = [];
-        for (const chunk of jsonChunks) {
-            try {
-                concepts.push(JSON.parse(chunk.trim()));
-            } catch (e) {
-                console.log('Failed to parse JSON chunk:', chunk, e);
+          }
+        } else {
+          const closeIdx = textBuffer.indexOf(CLOSE_TAG);
+          if (closeIdx !== -1) {
+            jsonBuffer += textBuffer.slice(0, closeIdx);
+            jsonChunks.push(jsonBuffer);
+            textBuffer = textBuffer.slice(closeIdx + CLOSE_TAG.length);
+            inJson = false;
+            jsonBuffer = '';
+            progress = true;
+          } else {
+            // Still inside JSON, no close tag yet — but the same
+            // "</json>" tag could be split across this fragment and
+            // the next one, so hold back a tail equal to the tag
+            // length instead of consuming everything blindly.
+            const safeFlushLen = Math.max(0, textBuffer.length - CLOSE_TAG.length);
+            if (safeFlushLen > 0) {
+              jsonBuffer += textBuffer.slice(0, safeFlushLen);
+              textBuffer = textBuffer.slice(safeFlushLen);
             }
+          }
         }
-
-        writeGlobalStorageData(context, "journal", concepts);
-        console.log(concepts);
-        return concepts;
+      }
     }
 
-    const journalEntry = await readGlobalStorageData(context, "journal");
+    // Stream ended — handle whatever's left in the buffers.
+    if (inJson) {
+      // The model never emitted a closing </json>. Don't silently drop
+      // the content: fold the leftover tail back in and keep what we have.
+      jsonBuffer += textBuffer;
+      textBuffer = '';
+      if (jsonBuffer.trim()) {
+        console.warn('parseAndStreamResponse: stream ended with an unterminated <json> block; attempting to parse partial content.');
+        jsonChunks.push(jsonBuffer);
+      }
+    } else if (textBuffer) {
+      stream.markdown(textBuffer);
+    }
 
-    /** @type {import('vscode').ChatRequestHandler} */
-    const handler = async (request, context, stream, token) => {
-        let prompt = BASE_PROMPT;
+    // Parse all collected JSON chunks
+    const concepts = [];
+    for (const chunk of jsonChunks) {
+      try {
+        concepts.push(JSON.parse(chunk.trim()));
+      } catch (e) {
+        console.log('Failed to parse JSON chunk:', chunk, e);
+      }
+    }
 
-        const messages = [vscode.LanguageModelChatMessage.User(prompt)];
-        const previousMessages = context.history.filter(
-            (h) => h instanceof vscode.ChatResponseTurn
-        );
-        previousMessages.forEach((m) => {
-            let fullMessage = '';
-            m.response.forEach((r) => {
-                fullMessage += r.value;
-            });
-            messages.push(vscode.LanguageModelChatMessage.Assistant(fullMessage));
-        });
+    writeGlobalStorageData(context, "journal", concepts);
+    console.log(concepts);
+    return concepts;
+  }
 
-        messages.push(
-            vscode.LanguageModelChatMessage.User(
-                `Here is the journal entry: ${JSON.stringify(journalEntry)}`
-            )
-        );
-        messages.push(vscode.LanguageModelChatMessage.User(request.prompt));
+  const journalEntry = await readGlobalStorageData(context, "journal");
 
-        const chatResponse = await request.model.sendRequest(messages, {}, token);
+  /** @type {import('vscode').ChatRequestHandler} */
+  const handler = async (request, context, stream, token) => {
+    let prompt = BASE_PROMPT;
 
-        await parseAndStreamResponse(chatResponse, stream);
-
-        stream.button({
-            command: 'code-tutor.show',
-            title: vscode.l10n.t('Save in journal')
-        });
-
-    };
-
-    const tutor = vscode.chat.createChatParticipant("17sf.code-expert", handler);
-    tutor.iconPath = vscode.Uri.joinPath(context.extensionUri, 'images', '17sf_extension_logo.jpg');
-
-    const disposable = vscode.commands.registerCommand('code-tutor.show', async () => {
-        const panel = vscode.window.createWebviewPanel(
-            'showJournal',
-            'Journal',
-            vscode.ViewColumn.One,
-            {
-                enableScripts: true,
-                retainContextWhenHidden: true
-            }
-        );
-        const currentJournal = await readGlobalStorageData(context, "journal");
-        panel.webview.html = getWebViewContent(currentJournal);
+    const messages = [vscode.LanguageModelChatMessage.User(prompt)];
+    const previousMessages = context.history.filter(
+      (h) => h instanceof vscode.ChatResponseTurn
+    );
+    previousMessages.forEach((m) => {
+      let fullMessage = '';
+      m.response.forEach((r) => {
+        fullMessage += r.value;
+      });
+      messages.push(vscode.LanguageModelChatMessage.Assistant(fullMessage));
     });
 
-    context.subscriptions.push(disposable);
+    messages.push(
+      vscode.LanguageModelChatMessage.User(
+        `Here is the journal entry: ${JSON.stringify(journalEntry)}`
+      )
+    );
+    messages.push(vscode.LanguageModelChatMessage.User(request.prompt));
+
+    const chatResponse = await request.model.sendRequest(messages, {}, token);
+
+    await parseAndStreamResponse(chatResponse, stream);
+
+    stream.button({
+      command: 'code-tutor.show',
+      title: vscode.l10n.t('Save in journal')
+    });
+
+  };
+
+  const tutor = vscode.chat.createChatParticipant("17sf.code-expert", handler);
+  tutor.iconPath = vscode.Uri.joinPath(context.extensionUri, 'images', '17sf_extension_logo.jpg');
+
+  const disposable = vscode.commands.registerCommand('code-tutor.show', async () => {
+    const panel = vscode.window.createWebviewPanel(
+      'showJournal',
+      'Journal',
+      vscode.ViewColumn.One,
+      {
+        enableScripts: true,
+        retainContextWhenHidden: true
+      }
+    );
+    const currentJournal = await readGlobalStorageData(context, "journal");
+    panel.webview.html = getWebViewContent(currentJournal);
+  });
+
+  context.subscriptions.push(disposable);
+}
+
+function getClientScript() {
+  return `
+    const vscode = typeof acquireVsCodeApi === 'function' ? acquireVsCodeApi() : null;
+
+    function safePostMessage(message) {
+      if (vscode) {
+        vscode.postMessage(message);
+        return;
+      }
+      console.log('Webview message:', message);
+    }
+
+    const conceptLibrary = {
+      c1: {
+        id: 'c1',
+        title: 'array destructuring',
+        desc: 'Extract values from arrays into variables',
+        familiar: true,
+        note: "You've used this pattern 6 times. Try recalling before asking for help.",
+        hint: 'Think of it as unpacking a list into separate variables, in the same order they appear.',
+        steps: [
+          'Create an array with values in a known order.',
+          'Write variables on the left side inside brackets.',
+          'Use those variables in your code instead of indexing repeatedly.'
+        ],
+        streak: 4,
+        total: 12,
+        rate: 32,
+        history: [
+          { date: 'Aug 15', file: 'app.js', action: 'Reviewed' },
+          { date: 'Aug 16', file: 'helpers.js', action: 'Used in refactor' },
+          { date: 'Aug 18', file: 'main.js', action: 'Practiced' }
+        ]
+      },
+      c2: {
+        id: 'c2',
+        title: 'prime number checking',
+        desc: 'Tests divisibility to determine primality',
+        familiar: false,
+        note: null,
+        hint: 'Check divisibility by iterating only up to the square root of the number.',
+        steps: [
+          'Handle small values first.',
+          'Loop through possible divisors.',
+          'Return false as soon as a divisor is found.'
+        ],
+        streak: 2,
+        total: 9,
+        rate: 58,
+        history: [
+          { date: 'Aug 14', file: 'math.js', action: 'Reviewed' },
+          { date: 'Aug 17', file: 'challenge.js', action: 'Tried' },
+          { date: 'Aug 18', file: 'exercise.js', action: 'Revisited' }
+        ]
+      },
+      c3: {
+        id: 'c3',
+        title: 'async generators',
+        desc: 'Yield values over time with async control flow',
+        familiar: false,
+        note: null,
+        hint: 'A generator can pause execution, and async allows waiting without blocking the rest of the app.',
+        steps: [
+          'Define an async generator function.',
+          'Use yield to emit values one at a time.',
+          'Await each value when consuming it.'
+        ],
+        streak: 1,
+        total: 6,
+        rate: 67,
+        history: [
+          { date: 'Aug 12', file: 'fetch.js', action: 'Read' },
+          { date: 'Aug 18', file: 'stream.js', action: 'Practice set' }
+        ]
+      }
+    };
+
+    let state = {
+      coach: [
+        { id: 'c1' },
+        { id: 'c2' },
+         {id: 'c3'}
+      ],
+      journalByLang: {
+        all: [
+          { id: 'c1', title: 'array destructuring', reinforced: true },
+          { id: 'c2', title: 'prime number checking', reinforced: false },
+          { id: 'c3', title: 'async generators', reinforced: false }
+        ],
+        html: [
+          { id: 'c1', title: 'array destructuring', reinforced: true }
+        ],
+        css: [
+          { id: 'c2', title: 'prime number checking', reinforced: false }
+        ],
+        js: [
+          { id: 'c3', title: 'async generators', reinforced: false },
+          { id: 'c2', title: 'prime number checking', reinforced: false }
+        ]
+      },
+      feedback: {},
+      activeLang: 'all',
+      selectedConceptId: null
+    };
+
+    function getConcept(id) {
+      return conceptLibrary[id] || null;
+    }
+
+    function renderCoach() {
+      const list = document.getElementById('concept-list');
+      list.innerHTML = state.coach.map(c => {
+        const concept = getConcept(c.id);
+        console.log(concept);
+        const feedback = state.feedback[c.id];
+        if (!concept) return '';
+
+        return \`
+          <div class="concept-card \${state.selectedConceptId === c.id ? 'selected' : ''}">
+            <div class="concept-header">
+              <span class="concept-title">\${concept.title}</span>
+              <span class="badge \${concept.familiar ? 'familiar' : 'new'}">\${concept.familiar ? 'Seen before' : 'New concept'}</span>
+            </div>
+            <div class="concept-desc">\${concept.desc}</div>
+            \${concept.note ? \`<div class="concept-note">\${concept.note}</div>\` : ''}
+            <div class="btn-row">
+              <button class="action" data-action="hint" data-id="\${concept.id}">Hint</button>
+              <button class="action" data-action="steps" data-id="\${concept.id}">Step by step</button>
+            </div>
+            \${feedback ? \`
+              <div class="coach-feedback \${feedback.type}">
+                \${feedback.type === 'hint' ? \`💡 \${feedback.text}\` : feedback.text}
+              </div>
+            \` : ''}
+          </div>
+        \`;
+      }).join('');
+    }
+
+    function renderJournal(lang = state.activeLang) {
+      const items = state.journalByLang[lang] || [];
+      const container = document.getElementById('weak-concepts');
+      container.innerHTML = items.map(c => \`
+        <div class="weak-row \${state.selectedConceptId === c.id ? 'selected' : ''}" data-id="\${c.id}">
+          <span class="name">
+            <input type="checkbox" \${c.reinforced ? 'checked' : ''} />
+            \${c.title}
+          </span>
+        </div>
+      \`).join('');
+    }
+
+    function openConceptDetail(id) {
+      const concept = getConcept(id);
+      if (!concept) return;
+
+      state.selectedConceptId = id;
+      document.getElementById('journal-list-view').style.display = 'none';
+      document.getElementById('concept-detail').classList.add('active');
+      document.getElementById('detail-title').textContent = concept.title;
+      document.getElementById('detail-streak').textContent = concept.streak;
+      document.getElementById('detail-total').textContent = concept.total;
+      document.getElementById('detail-rate').textContent = concept.rate + '%';
+      document.getElementById('detail-history').innerHTML = concept.history.map(h => \`
+        <div class="history-row"><span>\${h.date} &middot; \${h.file}</span><span>\${h.action}</span></div>
+      \`).join('');
+
+      renderCoach();
+      renderJournal();
+    }
+
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+        btn.classList.add('active');
+        document.getElementById(\`\${btn.dataset.view}-view\`).classList.add('active');
+      });
+    });
+
+    document.getElementById('lang-filter').addEventListener('click', (e) => {
+      if (e.target.tagName !== 'BUTTON') return;
+      document.querySelectorAll('#lang-filter button').forEach(b => b.classList.remove('active'));
+      e.target.classList.add('active');
+      state.activeLang = e.target.dataset.lang;
+      renderJournal(state.activeLang);
+    });
+
+    document.getElementById('concept-list').addEventListener('click', (e) => {
+      const btn = e.target.closest('button.action');
+      if (!btn) return;
+
+      const conceptId = btn.dataset.id;
+      const concept = getConcept(conceptId);
+      if (!concept) return;
+
+      if (btn.dataset.action === 'hint') {
+        state.feedback[conceptId] = {
+          type: 'hint',
+          text: concept.hint
+        };
+        safePostMessage({ command: 'requestHint', conceptId });
+      }
+
+      if (btn.dataset.action === 'steps') {
+        state.feedback[conceptId] = {
+          type: 'steps',
+          text: \`<ol>\${concept.steps.map(step => \`<li>\${step}</li>\`).join('')}</ol>\`
+        };
+        safePostMessage({ command: 'requestSteps', conceptId });
+      }
+
+      renderCoach();
+    });
+
+    document.getElementById('weak-concepts').addEventListener('click', (e) => {
+      const row = e.target.closest('.weak-row');
+      if (!row) return;
+
+      const conceptId = row.dataset.id;
+      safePostMessage({ command: 'selectConcept', conceptId });
+      openConceptDetail(conceptId);
+    });
+
+    document.getElementById('back-to-journal').addEventListener('click', () => {
+      state.selectedConceptId = null;
+      document.getElementById('concept-detail').classList.remove('active');
+      document.getElementById('journal-list-view').style.display = 'block';
+      renderCoach();
+      renderJournal();
+    });
+
+    window.addEventListener('message', (event) => {
+      const msg = event.data;
+      if (msg.type === 'init') {
+        state = { ...state, ...msg.data };
+        renderCoach();
+        renderJournal();
+      }
+      if (msg.type === 'conceptDetail') {
+        openConceptDetail(msg.data.id || msg.data.conceptId);
+      }
+    });
+
+    renderCoach();
+    renderJournal();
+  `;
 }
 /**
  * @param {*} journalEntries
  */
 function getWebViewContent(journalEntries) {
-    return `<!DOCTYPE html>
-<html>
+  const clientScript = getClientScript();
+
+  return `<!DOCTYPE html>
   <head>
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline';">
     <style>
 :root {
-  --primary-50: #E3F2FD;
-  --primary-100: #BBDEFB;
-  --primary-300: #90CAF9;
-  --primary-500: #2196F3;
-  --primary-900: #0D47A1;
-  --text: #123B6D;
-  --surface: #F7FBFF;
-  --card: #FFFFFF;
-  --border: #CFE4FF;
-  --muted: #5B7DA3;
+  --vscode-font-family: 'Segoe UI', sans-serif;
+  --vscode-foreground: #1f1f1f;
+  --vscode-editor-background: #ffffff;
+  --vscode-panel-border: #d0d0d0;
+  --vscode-editorWidget-background: #f5f5f5;
+  --vscode-descriptionForeground: #5c5c5c;
+  --vscode-button-secondaryBackground: #efefef;
+  --vscode-button-secondaryForeground: #1f1f1f;
+  --vscode-button-secondaryHoverBackground: #e2e2e2;
+  --vscode-focusBorder: #0078d4;
+  --vscode-list-hoverBackground: #eaf3ff;
+  --vscode-textLink-foreground: #0066cc;
 }
 
 body {
-  font-family: 'Segoe UI', sans-serif;
-  color: var(--text);
-  background: linear-gradient(180deg, var(--primary-50) 0%, #F8FBFF 100%);
+  font-family: var(--vscode-font-family, 'Segoe UI', sans-serif);
+  color: var(--vscode-foreground, #1f1f1f);
+  background: var(--vscode-editor-background, #ffffff);
   padding: 0;
   margin: 0;
   font-size: 13px;
 }
 .tab-bar {
   display: flex;
-  border-bottom: 1px solid var(--border);
-  background: rgba(255,255,255,0.5);
-  backdrop-filter: blur(4px);
+  border-bottom: 1px solid var(--vscode-panel-border, #d0d0d0);
 }
 .tab-btn {
   flex: 1;
-  padding: 12px 0;
+  padding: 10px 0;
   text-align: center;
-  background: transparent;
+  background: none;
   border: none;
-  color: var(--text);
+  color: var(--vscode-foreground, #1f1f1f);
   cursor: pointer;
   font-size: 13px;
   border-bottom: 2px solid transparent;
-  transition: all 0.2s ease;
 }
 .tab-btn.active {
-  border-bottom: 2px solid var(--primary-500);
-  font-weight: 700;
-  background: rgba(33, 150, 243, 0.06);
+  border-bottom: 2px solid var(--vscode-focusBorder, #0078d4);
+  font-weight: 600;
 }
 .view { display: none; padding: 16px; }
 .view.active { display: block; }
 
 .concept-card {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 14px 14px 12px;
-  margin-bottom: 12px;
-  box-shadow: 0 3px 10px rgba(13, 71, 161, 0.06);
-  transition: border-color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
-}
-.concept-card:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 6px 16px rgba(13, 71, 161, 0.08);
+  background: var(--vscode-editorWidget-background, #f5f5f5);
+  border: 1px solid var(--vscode-panel-border, #d0d0d0);
+  border-radius: 6px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 .concept-card.selected {
-  border-color: var(--primary-500);
-  box-shadow: 0 0 0 2px rgba(33, 150, 243, 0.12);
+  border-color: var(--vscode-focusBorder, #0078d4);
+  box-shadow: 0 0 0 1px rgba(0, 120, 212, 0.12);
 }
 .concept-header {
   display: flex;
@@ -249,18 +492,17 @@ body {
   align-items: center;
   margin-bottom: 4px;
 }
-.concept-title { font-weight: 700; color: var(--primary-900); }
+.concept-title { font-weight: 600; }
 .badge {
   font-size: 11px;
-  padding: 4px 8px;
-  border-radius: 999px;
-  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 10px;
 }
-.badge.familiar { background: rgba(33, 150, 243, 0.12); color: var(--primary-900); }
-.badge.new { background: rgba(144, 202, 249, 0.22); color: var(--primary-900); }
-.concept-desc { color: var(--muted); margin: 4px 0 8px; }
+.badge.familiar { background: #1d9e7530; color: #1d9e75; }
+.badge.new { background: #ef9f2730; color: #ef9f27; }
+.concept-desc { color: var(--vscode-descriptionForeground, #5c5c5c); margin: 4px 0 8px; }
 .concept-note {
-  color: var(--muted);
+  color: var(--vscode-descriptionForeground, #5c5c5c);
   font-size: 11px;
   margin: 0 0 10px;
   line-height: 1.4;
@@ -268,134 +510,68 @@ body {
 .btn-row { display: flex; gap: 8px; }
 button.action {
   flex: 1;
-  padding: 8px 10px;
-  background: linear-gradient(180deg, var(--primary-50) 0%, #DBEDFF 100%);
-  color: var(--primary-900);
-  border: 1px solid var(--primary-100);
-  border-radius: 8px;
+  padding: 6px 10px;
+  background: var(--vscode-button-secondaryBackground, #efefef);
+  color: var(--vscode-button-secondaryForeground, #1f1f1f);
+  border: 1px solid var(--vscode-panel-border, #d0d0d0);
+  border-radius: 4px;
   cursor: pointer;
   font-size: 12px;
-  font-weight: 600;
 }
-button.action:hover { background: linear-gradient(180deg, #DBEDFF 0%, #CFE8FF 100%); }
+button.action:hover { background: var(--vscode-button-secondaryHoverBackground, #e2e2e2); }
 
 .coach-feedback {
   margin-top: 10px;
-  padding: 10px 12px;
-  border-radius: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
   font-size: 12px;
-  line-height: 1.55;
+  line-height: 1.5;
 }
 .coach-feedback.hint {
-  background: rgba(33, 150, 243, 0.08);
-  border: 1px solid rgba(33, 150, 243, 0.2);
+  background: rgba(0, 120, 212, 0.08);
+  border: 1px solid rgba(0, 120, 212, 0.2);
+  color: var(--vscode-foreground, #1f1f1f);
 }
 .coach-feedback.steps {
-  background: rgba(13, 71, 161, 0.06);
-  border: 1px solid rgba(13, 71, 161, 0.18);
+  background: rgba(29, 158, 117, 0.08);
+  border: 1px solid rgba(29, 158, 117, 0.2);
+  color: var(--vscode-foreground, #1f1f1f);
 }
 .coach-feedback ol {
   margin: 6px 0 0 18px;
   padding: 0;
 }
-.step-item {
-  margin-bottom: 10px;
-}
-.step-text {
-  margin-bottom: 6px;
-  color: var(--text);
-}
-.step-code {
-  background: #0d1b2a;
-  color: #e3f2fd;
-  border-radius: 8px;
-  padding: 8px 10px;
-  margin: 0;
-  overflow-x: auto;
-  font-size: 11px;
-  line-height: 1.5;
-}
 
 .lang-filter { display: flex; gap: 6px; margin-bottom: 14px; }
 .lang-filter button {
-  background: rgba(255,255,255,0.7); border: 1px solid var(--border);
-  color: var(--text); border-radius: 999px; padding: 5px 11px;
+  background: none; border: 1px solid var(--vscode-panel-border, #d0d0d0);
+  color: var(--vscode-foreground, #1f1f1f); border-radius: 4px; padding: 4px 10px;
   cursor: pointer; font-size: 12px;
 }
 .lang-filter button.active {
-  background: var(--primary-500);
-  border-color: var(--primary-500);
-  color: white;
-}
-.journal-overview {
-  background: linear-gradient(135deg, rgba(33,150,243,0.12), rgba(144,202,249,0.18));
-  border: 1px solid rgba(33,150,243,0.25);
-  border-radius: 12px;
-  padding: 12px 14px;
-  margin-bottom: 12px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  box-shadow: 0 6px 18px rgba(13,71,161,0.08);
-}
-.journal-overview-label {
-  color: var(--primary-900);
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  font-weight: 700;
-}
-.journal-overview-value {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  background: rgba(13,71,161,0.08);
-  border: 1px solid rgba(13,71,161,0.14);
-  color: var(--primary-900);
-  border-radius: 999px;
-  padding: 6px 10px;
-  font-size: 15px;
-  font-weight: 800;
-}
-.journal-overview-value::before {
-  content: '🔥';
-  font-size: 13px;
-}
-.journal-header {
-  display: block;
-  padding: 10px 12px 8px;
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
+  border-color: var(--vscode-focusBorder, #0078d4);
+  color: var(--vscode-focusBorder, #0078d4);
 }
 .weak-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 10px; border-bottom: 1px solid var(--vscode-panel-border, #d0d0d0);
   cursor: pointer;
-  border-radius: 8px;
-  transition: background 0.15s ease;
 }
-.weak-row:hover { background: rgba(144, 202, 249, 0.12); }
-.weak-row.selected { background: rgba(33, 150, 243, 0.1); }
+.weak-row:hover { background: var(--vscode-list-hoverBackground, #eaf3ff); }
+.weak-row.selected { background: rgba(0, 120, 212, 0.08); }
 .weak-row .name { display: flex; align-items: center; gap: 8px; }
-.weak-row input[type="checkbox"] { pointer-events: none; accent-color: var(--primary-500); }
+.weak-row input[type="checkbox"] { pointer-events: none; }
 
 #concept-detail { display: none; }
 #concept-detail.active { display: block; }
-.back-link { cursor: pointer; color: var(--primary-900); font-size: 12px; margin-bottom: 10px; font-weight: 600; }
+.back-link { cursor: pointer; color: var(--vscode-textLink-foreground, #0066cc); font-size: 12px; margin-bottom: 10px; }
 .stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 14px; }
-.stat-box { background: rgba(255,255,255,0.7); border: 1px solid var(--border); border-radius: 10px; padding: 10px 10px; }
-.stat-box .label { font-size: 11px; color: var(--muted); }
-.stat-box .value { font-size: 16px; font-weight: 700; color: var(--primary-900); }
+.stat-box { background: var(--vscode-editorWidget-background, #f5f5f5); border-radius: 6px; padding: 8px 10px; }
+.stat-box .label { font-size: 11px; color: var(--vscode-descriptionForeground, #5c5c5c); }
+.stat-box .value { font-size: 16px; font-weight: 600; }
 .history-row {
-  display: flex; justify-content: space-between; padding: 7px 0;
-  border-bottom: 1px solid var(--border); font-size: 12px;
-  color: var(--muted);
+  display: flex; justify-content: space-between; padding: 6px 0;
+  border-bottom: 1px solid var(--vscode-panel-border, #d0d0d0); font-size: 12px;
 }
     </style>
   </head>
@@ -431,44 +607,7 @@ button.action:hover { background: linear-gradient(180deg, #DBEDFF 0%, #CFE8FF 10
     <div id="detail-history"></div>
   </div>
 </div>
-    <script>
-    
-    
-      const journalEntries = ${JSON.stringify(journalEntries)};
-      const body = document.querySelector('body');
-
-      for (let i = 0; i < journalEntries.length; i++) {
-        const [date, ...turns] = journalEntries[i];
-
-        const heading = document.createElement('h2');
-        heading.textContent = date;
-        heading.classList.add('date-heading');
-        body.appendChild(heading);
-
-        for (let j = 0; j < turns.length; j++) {
-          const concepts = turns[j];
-          for (let k = 0; k < concepts.length; k++) {
-            const concept = concepts[k];
-            if (!concept || typeof concept.name !== 'string') {
-              continue; // skip malformed entries
-            }
-
-            const card = document.createElement('div');
-            const title = document.createElement('h1');
-            const description = document.createElement('p');
-            title.textContent = concept.name;
-            title.style.color = "white";
-            description.style.color = "white";
-            description.textContent = concept.description;
-            card.classList.add('card');
-            card.appendChild(title);
-            card.appendChild(description);
-
-            body.appendChild(card);
-          }
-        }
-      }
-    </script>
+    <script>${clientScript}</script>
   </body>
 </html>`;
 }
